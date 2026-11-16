@@ -154,9 +154,23 @@ pub struct LocalApiOptions {
     /// Where `/streams` finds its engine; the running app's shared engine
     /// when unset.
     pub(crate) stream_engine: Option<crate::transcription::stream::EngineSource>,
+    /// Who owns the engine prepared models run on: the app's dictation
+    /// engine, or, in `hex service`, the service's own.
+    pub(crate) engine_sharing: crate::transcription::service::EngineSharing,
     /// The origins whose browser pages may call this API (Labs › Browser
     /// access to the local API). Tests install their own gate here.
     pub(crate) cors: Cors,
+}
+
+impl LocalApiOptions {
+    /// `hex service [--embedded]`: no app, so prepared models share the
+    /// service's own engine.
+    fn service() -> Self {
+        Self {
+            engine_sharing: crate::transcription::service::EngineSharing::OwnPrepared,
+            ..Self::default()
+        }
+    }
 }
 
 impl LocalApi {
@@ -207,7 +221,7 @@ impl LocalApi {
             None,
             Arc::new(current_health),
             events,
-            LocalApiOptions::default(),
+            LocalApiOptions::service(),
             None,
         )
     }
@@ -242,7 +256,9 @@ impl LocalApi {
             prepare_discovery_path(path)?;
         }
         let (transcription_service, transcription) =
-            crate::transcription::service::TranscriptionService::start()?;
+            crate::transcription::service::TranscriptionService::start_with(
+                options.engine_sharing,
+            )?;
         let listener = TcpListener::bind("127.0.0.1:0").wrap_err("could not bind the local API")?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
@@ -397,9 +413,15 @@ pub fn run_service(
                         Ok(0) => {
                             shutdown.store(true, Ordering::Release);
                             thread::sleep(Duration::from_secs(5));
-                            tracing::warn!(
-                                "forcing embedded service shutdown after host lease closed"
-                            );
+                            // The last resort must not wait on logging: a
+                            // stuck writer would keep the helper (and its
+                            // model) alive after its host is gone.
+                            let _ = thread::Builder::new().spawn(|| {
+                                tracing::warn!(
+                                    "forcing embedded service shutdown after host lease closed"
+                                );
+                            });
+                            thread::sleep(Duration::from_millis(100));
                             std::process::exit(0);
                         }
                         Ok(_) => {}
@@ -419,7 +441,7 @@ pub fn run_service(
         drop(stdout);
         api
     } else {
-        LocalApi::start(events, LocalApiOptions::default())?
+        LocalApi::start(events, LocalApiOptions::service())?
     };
     while !shutdown.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(100));
