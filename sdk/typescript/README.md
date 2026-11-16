@@ -171,6 +171,40 @@ where the file comes from: `download`, `hex`, `imported`, or
 `found: owner/name@abcdef1` for a model another app downloaded to the Hugging Face
 cache, which Hex uses where it is.
 
+## Live Streams
+
+A transcriber can also transcribe audio live while the host records it. Push
+16 kHz mono samples as they arrive and read partial text from `events`:
+
+```ts
+const stream = await transcriber.stream()
+
+const preview = (async () => {
+  for await (const event of stream.events) {
+    if (event.type === "partial") updatePreview(event.stable + event.tentative)
+    if (event.type === "segment") commit(event.text)
+  }
+})()
+
+recorder.onSamples((samples: Float32Array) => void stream.push(samples))
+
+// When the user stops:
+const { text, segments, durationMs } = await stream.finish()
+await preview
+```
+
+`stream.partials` is `true` only when the loaded model can stream on its device
+(a Metal or Vulkan GPU); otherwise only `segment` events and the final arrive.
+`stable` text is committed; `tentative` text may still change, and a newer
+`partial` for the same `segment` replaces the previous one. The handle renews
+the host's ten-second lease every few seconds while open, so a paused recorder
+keeps its stream. One stream runs at a time (`stream-busy`), and streams never
+load a model. A `finish()` rejected with `stream-finish-timeout` leaves the
+stream running; call it again. Always `finish()` or `cancel()` explicitly. The
+low-level `client.streams.create()` takes an optional `model` and `language`,
+which must match what the host holds (`model-mismatch`). The contract is
+[`docs/streams.md`](https://github.com/anomalyco/hex/blob/dev/docs/streams.md).
+
 ## Connect to HEX Desktop
 
 Alternatively, reuse the microphone and engine owned by the running HEX desktop
